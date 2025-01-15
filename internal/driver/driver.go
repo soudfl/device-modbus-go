@@ -126,6 +126,10 @@ func (d *Driver) HandleReadCommands(deviceName string, protocols map[string]mode
 	deviceClient, err := d.createDeviceClient(connectionInfo)
 	if err != nil {
 		driver.Logger.Errorf("Read command OpenConnection failed. err:%v \n", err)
+		if err := deviceClient.CloseConnection(); err != nil {
+			driver.Logger.Error("CloseConnection failed")
+		}
+		delete(d.clientMap, connectionInfo.String())
 		return responses, err
 	}
 	driver.Logger.Debugf("key = %s,client = %+v", connectionInfo.String(), deviceClient)
@@ -135,6 +139,10 @@ func (d *Driver) HandleReadCommands(deviceName string, protocols map[string]mode
 		res, err := handleReadCommandRequest(deviceClient, req)
 		if err != nil {
 			driver.Logger.Infof("Read command failed. Cmd:%v err:%v \n", req.DeviceResourceName, err)
+			if err := deviceClient.CloseConnection(); err != nil {
+				driver.Logger.Error("CloseConnection failed")
+			}
+			delete(d.clientMap, connectionInfo.String())
 			return responses, err
 		}
 
@@ -186,6 +194,11 @@ func (d *Driver) HandleWriteCommands(deviceName string, protocols map[string]mod
 	// create device client and open connection
 	deviceClient, err := d.createDeviceClient(connectionInfo)
 	if err != nil {
+		driver.Logger.Errorf("Write command OpenConnection failed. err:%v \n", err)
+		if err := deviceClient.CloseConnection(); err != nil {
+			driver.Logger.Error("CloseConnection failed")
+		}
+		delete(d.clientMap, connectionInfo.String())
 		return err
 	}
 
@@ -194,6 +207,10 @@ func (d *Driver) HandleWriteCommands(deviceName string, protocols map[string]mod
 		err = handleWriteCommandRequest(deviceClient, req, params[i])
 		if err != nil {
 			d.Logger.Error(err.Error())
+			if err := deviceClient.CloseConnection(); err != nil {
+				driver.Logger.Error("CloseConnection failed")
+			}
+			delete(d.clientMap, connectionInfo.String())
 			break
 		}
 	}
