@@ -125,6 +125,8 @@ func (d *Driver) HandleReadCommands(deviceName string, protocols map[string]mode
 	// create device client and open connection
 	deviceClient, err := d.createDeviceClient(connectionInfo)
 	if err != nil {
+		d.clientMutex.Lock()
+		defer d.clientMutex.Unlock()
 		driver.Logger.Errorf("Read command OpenConnection failed. err:%v \n", err)
 		if err := deviceClient.CloseConnection(); err != nil {
 			driver.Logger.Error("CloseConnection failed")
@@ -138,6 +140,8 @@ func (d *Driver) HandleReadCommands(deviceName string, protocols map[string]mode
 	for i, req := range reqs {
 		res, err := handleReadCommandRequest(deviceClient, req)
 		if err != nil {
+			d.clientMutex.Lock()
+			defer d.clientMutex.Unlock()
 			driver.Logger.Infof("Read command failed. Cmd:%v err:%v \n", req.DeviceResourceName, err)
 			if err := deviceClient.CloseConnection(); err != nil {
 				driver.Logger.Error("CloseConnection failed")
@@ -194,6 +198,8 @@ func (d *Driver) HandleWriteCommands(deviceName string, protocols map[string]mod
 	// create device client and open connection
 	deviceClient, err := d.createDeviceClient(connectionInfo)
 	if err != nil {
+		d.clientMutex.Lock()
+		defer d.clientMutex.Unlock()
 		driver.Logger.Errorf("Write command OpenConnection failed. err:%v \n", err)
 		if err := deviceClient.CloseConnection(); err != nil {
 			driver.Logger.Error("CloseConnection failed")
@@ -206,6 +212,8 @@ func (d *Driver) HandleWriteCommands(deviceName string, protocols map[string]mod
 	for i, req := range reqs {
 		err = handleWriteCommandRequest(deviceClient, req, params[i])
 		if err != nil {
+			d.clientMutex.Lock()
+			defer d.clientMutex.Unlock()
 			d.Logger.Error(err.Error())
 			if err := deviceClient.CloseConnection(); err != nil {
 				driver.Logger.Error("CloseConnection failed")
