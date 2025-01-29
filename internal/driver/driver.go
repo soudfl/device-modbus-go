@@ -128,8 +128,10 @@ func (d *Driver) HandleReadCommands(deviceName string, protocols map[string]mode
 		d.clientMutex.Lock()
 		defer d.clientMutex.Unlock()
 		driver.Logger.Errorf("Read command OpenConnection failed. err:%v \n", err)
-		if err := deviceClient.CloseConnection(); err != nil {
-			driver.Logger.Error("CloseConnection failed")
+		if deviceClient != nil {
+			if err := deviceClient.CloseConnection(); err != nil {
+				driver.Logger.Error("CloseConnection failed")
+			}
 		}
 		delete(d.clientMap, connectionInfo.String())
 		return responses, err
@@ -201,8 +203,10 @@ func (d *Driver) HandleWriteCommands(deviceName string, protocols map[string]mod
 		d.clientMutex.Lock()
 		defer d.clientMutex.Unlock()
 		driver.Logger.Errorf("Write command OpenConnection failed. err:%v \n", err)
-		if err := deviceClient.CloseConnection(); err != nil {
-			driver.Logger.Error("CloseConnection failed")
+		if deviceClient != nil {
+			if err := deviceClient.CloseConnection(); err != nil {
+				driver.Logger.Error("CloseConnection failed")
+			}
 		}
 		delete(d.clientMap, connectionInfo.String())
 		return err
@@ -215,8 +219,10 @@ func (d *Driver) HandleWriteCommands(deviceName string, protocols map[string]mod
 			d.clientMutex.Lock()
 			defer d.clientMutex.Unlock()
 			d.Logger.Error(err.Error())
-			if err := deviceClient.CloseConnection(); err != nil {
-				driver.Logger.Error("CloseConnection failed")
+			if deviceClient != nil {
+				if err := deviceClient.CloseConnection(); err != nil {
+					driver.Logger.Error("CloseConnection failed")
+				}
 			}
 			delete(d.clientMap, connectionInfo.String())
 			break
