@@ -8,6 +8,7 @@
 package driver
 
 import (
+	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -34,13 +35,26 @@ type Driver struct {
 
 var concurrentCommandLimit = 100
 
-func (d *Driver) createDeviceClient(info *ConnectionInfo) (DeviceClient, error) {
+const maxRetries = 3
+const retryDelay = time.Millisecond * 100
+
+func (d *Driver) createDeviceClient(info *ConnectionInfo, recreate bool) (DeviceClient, error) {
 	d.clientMutex.Lock()
 	defer d.clientMutex.Unlock()
 	key := info.String()
 	c, ok := d.clientMap[key]
 	if ok {
-		return c, nil
+		if !recreate {
+			return c, nil
+		}
+
+		// close the old client
+		if err := c.CloseConnection(); err != nil {
+			delete(d.clientMap, key)
+			d.Logger.Errorf("CloseConnection failed. err:%v \n", err)
+			return nil, err
+		}
+		delete(d.clientMap, key)
 	}
 	c, err := NewDeviceClient(info)
 	if err != nil {
@@ -123,36 +137,28 @@ func (d *Driver) HandleReadCommands(deviceName string, protocols map[string]mode
 	responses = make([]*sdkModel.CommandValue, len(reqs))
 
 	// create device client and open connection
-	deviceClient, err := d.createDeviceClient(connectionInfo)
+	deviceClient, err := d.createDeviceClient(connectionInfo, false)
+
 	if err != nil {
-		d.clientMutex.Lock()
-		defer d.clientMutex.Unlock()
-		driver.Logger.Errorf("Read command OpenConnection failed. err:%v \n", err)
-		if deviceClient != nil {
-			if err := deviceClient.CloseConnection(); err != nil {
-				driver.Logger.Error("CloseConnection failed")
-			}
-		}
-		delete(d.clientMap, connectionInfo.String())
-		return responses, err
+		return nil, err
 	}
+
 	driver.Logger.Debugf("key = %s,client = %+v", connectionInfo.String(), deviceClient)
 
 	// handle command requests
 	for i, req := range reqs {
-		res, err := handleReadCommandRequest(deviceClient, req)
-		if err != nil {
-			d.clientMutex.Lock()
-			defer d.clientMutex.Unlock()
-			driver.Logger.Infof("Read command failed. Cmd:%v err:%v \n", req.DeviceResourceName, err)
-			if err := deviceClient.CloseConnection(); err != nil {
-				driver.Logger.Error("CloseConnection failed")
+		for attempts := 0; attempts < maxRetries; attempts++ {
+			d.Logger.Debugf("attempts %d", attempts)
+			res, err := handleReadCommandRequest(deviceClient, req)
+			if err == nil {
+				responses[i] = res
+				break
 			}
-			delete(d.clientMap, connectionInfo.String())
-			return responses, err
-		}
 
-		responses[i] = res
+			time.Sleep(retryDelay)
+			// recreate device client if error occurs
+			deviceClient, _ = d.createDeviceClient(connectionInfo, true)
+		}
 	}
 	driver.Logger.Debugf("get response %v", responses)
 	return responses, nil
@@ -198,38 +204,33 @@ func (d *Driver) HandleWriteCommands(deviceName string, protocols map[string]mod
 	defer d.unlockAddress(d.lockableAddress(connectionInfo))
 
 	// create device client and open connection
-	deviceClient, err := d.createDeviceClient(connectionInfo)
+	deviceClient, err := d.createDeviceClient(connectionInfo, false)
 	if err != nil {
-		d.clientMutex.Lock()
-		defer d.clientMutex.Unlock()
-		driver.Logger.Errorf("Write command OpenConnection failed. err:%v \n", err)
-		if deviceClient != nil {
-			if err := deviceClient.CloseConnection(); err != nil {
-				driver.Logger.Error("CloseConnection failed")
-			}
-		}
-		delete(d.clientMap, connectionInfo.String())
 		return err
 	}
+	driver.Logger.Debugf("key = %s,client = %+v", connectionInfo.String(), deviceClient)
+
+	errs := make([]error, 0)
 
 	// handle command requests
 	for i, req := range reqs {
-		err = handleWriteCommandRequest(deviceClient, req, params[i])
-		if err != nil {
-			d.clientMutex.Lock()
-			defer d.clientMutex.Unlock()
-			d.Logger.Error(err.Error())
-			if deviceClient != nil {
-				if err := deviceClient.CloseConnection(); err != nil {
-					driver.Logger.Error("CloseConnection failed")
-				}
+		for attempts := 0; attempts < maxRetries; attempts++ {
+			d.Logger.Debugf("attempts %d", attempts)
+			err = handleWriteCommandRequest(deviceClient, req, params[i])
+			if err == nil {
+				break
 			}
-			delete(d.clientMap, connectionInfo.String())
-			break
+			errs = append(errs, err)
+			time.Sleep(retryDelay)
+			// recreate device client if error occurs
+			deviceClient, err = d.createDeviceClient(connectionInfo, true)
+			if err != nil {
+				errs = append(errs, err)
+			}
 		}
 	}
 
-	return err
+	return errors.Join(errs...)
 }
 
 func handleWriteCommandRequest(deviceClient DeviceClient, req sdkModel.CommandRequest, param *sdkModel.CommandValue) error {
