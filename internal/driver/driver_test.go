@@ -132,7 +132,7 @@ func TestDriver_createDeviceClient(t *testing.T) {
 				stopped:             tt.fields.stopped,
 				clientMap:           tt.fields.clientMap,
 			}
-			got, err := d.createDeviceClient(tt.args.info)
+			got, err := d.createDeviceClient(tt.args.info, false)
 			if !tt.wantErr(t, err, fmt.Sprintf("createDeviceClient(%v)", tt.args.info)) {
 				return
 			}
