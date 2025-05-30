@@ -9,6 +9,7 @@ package driver
 import (
 	"fmt"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	sdkModel "github.com/edgexfoundry/device-sdk-go/v3/pkg/models"
@@ -24,12 +25,14 @@ func init() {
 func TestLockAddressWithAddressCountLimit(t *testing.T) {
 	address := "/dev/USB0tty"
 	driver.addressMap = make(map[string]chan bool)
-	driver.workingAddressCount = make(map[string]int)
-	driver.workingAddressCount[address] = concurrentCommandLimit
+	driver.workingAddressCount = make(map[string]*atomic.Int32)
+	v := atomic.Int32{}
+	v.Store(concurrentCommandLimit)
+	driver.workingAddressCount[address] = &v
 
 	err := driver.lockAddress(address)
 
-	if err == nil || !strings.Contains(err.Error(), "High-frequency command execution") {
+	if err == nil || !strings.Contains(err.Error(), "high-frequency command execution") {
 		t.Errorf("Unexpect result, it should return high-frequency error, %v", err)
 	}
 }
@@ -37,8 +40,10 @@ func TestLockAddressWithAddressCountLimit(t *testing.T) {
 func TestLockAddressWithAddressCountUnderLimit(t *testing.T) {
 	address := "/dev/USB0tty"
 	driver.addressMap = make(map[string]chan bool)
-	driver.workingAddressCount = make(map[string]int)
-	driver.workingAddressCount[address] = concurrentCommandLimit - 1
+	driver.workingAddressCount = make(map[string]*atomic.Int32)
+	v := atomic.Int32{}
+	v.Store(concurrentCommandLimit - 1)
+	driver.workingAddressCount[address] = &v
 
 	err := driver.lockAddress(address)
 
@@ -53,7 +58,7 @@ func TestDriver_createDeviceClient(t *testing.T) {
 		Logger              logger.LoggingClient
 		AsyncCh             chan<- *sdkModel.AsyncValues
 		addressMap          map[string]chan bool
-		workingAddressCount map[string]int
+		workingAddressCount map[string]*atomic.Int32
 		stopped             bool
 		clientMap           map[string]DeviceClient
 	}
@@ -72,7 +77,7 @@ func TestDriver_createDeviceClient(t *testing.T) {
 			fields: fields{
 				Logger:              mockLogger,
 				addressMap:          make(map[string]chan bool),
-				workingAddressCount: make(map[string]int),
+				workingAddressCount: make(map[string]*atomic.Int32),
 				clientMap: map[string]DeviceClient{
 					"modbus-tcp:172.0.0.1:502": &ModbusClient{},
 				},
@@ -99,7 +104,7 @@ func TestDriver_createDeviceClient(t *testing.T) {
 			fields: fields{
 				Logger:              mockLogger,
 				addressMap:          make(map[string]chan bool),
-				workingAddressCount: make(map[string]int),
+				workingAddressCount: make(map[string]*atomic.Int32),
 				clientMap: map[string]DeviceClient{
 					"modbus-rtu:172.0.0.1:502:9600:8:1:N": &ModbusClient{},
 				},

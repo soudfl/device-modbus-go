@@ -10,7 +10,9 @@ package driver
 import (
 	"errors"
 	"fmt"
+	"io"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/edgexfoundry/device-sdk-go/v3/pkg/interfaces"
@@ -25,38 +27,44 @@ var driver *Driver
 type Driver struct {
 	Logger              logger.LoggingClient
 	AsyncCh             chan<- *sdkModel.AsyncValues
-	addressMutex        sync.Mutex
+	addressMutex        sync.RWMutex
 	addressMap          map[string]chan bool
-	workingAddressCount map[string]int
+	workingAddressCount map[string]*atomic.Int32
 	stopped             bool
-	clientMutex         sync.Mutex
+	clientMutex         sync.RWMutex
 	clientMap           map[string]DeviceClient
 }
 
-var concurrentCommandLimit = 100
+var concurrentCommandLimit int32 = 100
 
-const maxRetries = 3
-const retryDelay = time.Millisecond * 100
+const maxRetries = 5
+const retryDelay = time.Millisecond * 80
 
-func (d *Driver) createDeviceClient(info *ConnectionInfo, recreate bool) (DeviceClient, error) {
+func (d *Driver) createDeviceClient(info *ConnectionInfo, recreate bool) (c DeviceClient, err error) {
+	key := info.String()
+	d.clientMutex.RLock()
+	c, ok := d.clientMap[key]
+	d.clientMutex.RUnlock()
+	if ok && !recreate {
+		// if the client already exists and we don't need to recreate it, return the existing client
+		d.Logger.Debugf("Device client already exists for key: %s, returning existing client", key)
+		return
+	}
+
 	d.clientMutex.Lock()
 	defer d.clientMutex.Unlock()
-	key := info.String()
-	c, ok := d.clientMap[key]
-	if ok {
-		if !recreate {
-			return c, nil
-		}
 
-		// close the old client
-		if err := c.CloseConnection(); err != nil {
-			delete(d.clientMap, key)
-			d.Logger.Errorf("CloseConnection failed. err:%v \n", err)
-			return nil, err
+	// close the old client if it exists and we are recreating
+	if c != nil {
+		d.Logger.Debugf("Closing existing device client for key: %s", key)
+		err = c.CloseConnection()
+		if err != nil {
+			driver.Logger.Errorf("close device client failed. err:%v \n", err)
 		}
 		delete(d.clientMap, key)
 	}
-	c, err := NewDeviceClient(info)
+	c, err = NewDeviceClient(info)
+	d.Logger.Debugf("Creating new device client for key: %s", key)
 	if err != nil {
 		driver.Logger.Errorf("create device client failed. err:%v \n", err)
 		return nil, err
@@ -75,27 +83,31 @@ func (d *Driver) lockAddress(address string) error {
 	if d.stopped {
 		return fmt.Errorf("service attempts to stop and unable to handle new request")
 	}
-	d.addressMutex.Lock()
+	d.addressMutex.RLock()
 	lock, ok := d.addressMap[address]
+	d.addressMutex.RUnlock()
 	if !ok {
 		lock = make(chan bool, 1)
+		d.addressMutex.Lock()
 		d.addressMap[address] = lock
+		d.addressMutex.Unlock()
 	}
 
 	// workingAddressCount used to check high-frequency command execution to avoid goroutine block
 	count, ok := d.workingAddressCount[address]
 	if !ok {
-		d.workingAddressCount[address] = 1
-	} else if count >= concurrentCommandLimit {
-		d.addressMutex.Unlock()
-		errorMessage := fmt.Sprintf("High-frequency command execution. There are %v commands with the same address in the queue", concurrentCommandLimit)
-		d.Logger.Error(errorMessage)
-		return fmt.Errorf(errorMessage)
+		// d.workingAddressCount[address] = 1
+		v := atomic.Int32{}
+		v.Store(1)
+		d.workingAddressCount[address] = &v
+	} else if count.Load() >= concurrentCommandLimit {
+		errorMessage := fmt.Errorf("high-frequency command execution. There are %v commands with the same address in the queue", concurrentCommandLimit)
+		d.Logger.Error(errorMessage.Error())
+		return errorMessage
 	} else {
-		d.workingAddressCount[address] = count + 1
+		d.workingAddressCount[address].Add(1)
 	}
 
-	d.addressMutex.Unlock()
 	lock <- true
 
 	return nil
@@ -103,10 +115,11 @@ func (d *Driver) lockAddress(address string) error {
 
 // unlockAddress remove token after command finish
 func (d *Driver) unlockAddress(address string) {
-	d.addressMutex.Lock()
+	d.addressMutex.RLock()
 	lock := d.addressMap[address]
-	d.workingAddressCount[address] = d.workingAddressCount[address] - 1
-	d.addressMutex.Unlock()
+	d.addressMutex.RUnlock()
+
+	d.workingAddressCount[address].Add(-1)
 	<-lock
 }
 
@@ -127,12 +140,13 @@ func (d *Driver) HandleReadCommands(deviceName string, protocols map[string]mode
 		driver.Logger.Errorf("Fail to create read command connection info. err:%v \n", err)
 		return responses, err
 	}
+	a := d.lockableAddress(connectionInfo)
 
-	err = d.lockAddress(d.lockableAddress(connectionInfo))
+	err = d.lockAddress(a)
 	if err != nil {
 		return responses, err
 	}
-	defer d.unlockAddress(d.lockableAddress(connectionInfo))
+	defer d.unlockAddress(a)
 
 	responses = make([]*sdkModel.CommandValue, len(reqs))
 
@@ -147,18 +161,39 @@ func (d *Driver) HandleReadCommands(deviceName string, protocols map[string]mode
 
 	// handle command requests
 	for i, req := range reqs {
-		for attempts := 0; attempts < maxRetries; attempts++ {
-			d.Logger.Debugf("attempts %d", attempts)
-			res, err := handleReadCommandRequest(deviceClient, req)
+		var attempts int
+		var err error
+		for attempts = 1; attempts <= maxRetries; attempts++ {
+			d.Logger.Debugf("read_attempt#%d", attempts)
+			var res *sdkModel.CommandValue
+			res, err = handleReadCommandRequest(deviceClient, req)
 			if err == nil {
 				responses[i] = res
 				break
+			} else if errors.Is(err, io.EOF) {
+				d.Logger.Errorf("handle read command request failed with EOF, retrying... attempt#%d, error: %v", attempts, err)
+				time.Sleep(retryDelay)
+				deviceClient, err = d.createDeviceClient(connectionInfo, true)
+				if err != nil {
+					d.Logger.Errorf("create device client failed, err: %v", err)
+					break
+				}
+			} else {
+				err := fmt.Errorf("handle read command request failed, error: %w", err)
+				d.Logger.Errorf(err.Error())
+				return nil, err
 			}
-
-			time.Sleep(retryDelay)
-			// recreate device client if error occurs
-			deviceClient, _ = d.createDeviceClient(connectionInfo, true)
 		}
+		if attempts > maxRetries {
+			d.Logger.Errorf("handle read command request failed after %d attempts, error: %v", maxRetries, err)
+			return nil, fmt.Errorf("failed to handle read command request after %d attempts: %w", maxRetries, err)
+		}
+		if responses[i] == nil {
+			err = fmt.Errorf("handle read command request failed, response is nil, error: %w", err)
+			d.Logger.Errorf(err.Error())
+			return nil, err
+		}
+		driver.Logger.Debugf("Read command finished. Cmd:%v, %v \n", req.DeviceResourceName, responses[i])
 	}
 	driver.Logger.Debugf("get response %v", responses)
 	return responses, nil
@@ -196,12 +231,13 @@ func (d *Driver) HandleWriteCommands(deviceName string, protocols map[string]mod
 		driver.Logger.Errorf("Fail to create write command connection info. err:%v \n", err)
 		return err
 	}
+	a := d.lockableAddress(connectionInfo)
 
-	err = d.lockAddress(d.lockableAddress(connectionInfo))
+	err = d.lockAddress(a)
 	if err != nil {
 		return err
 	}
-	defer d.unlockAddress(d.lockableAddress(connectionInfo))
+	defer d.unlockAddress(a)
 
 	// create device client and open connection
 	deviceClient, err := d.createDeviceClient(connectionInfo, false)
@@ -214,19 +250,32 @@ func (d *Driver) HandleWriteCommands(deviceName string, protocols map[string]mod
 
 	// handle command requests
 	for i, req := range reqs {
-		for attempts := 0; attempts < maxRetries; attempts++ {
-			d.Logger.Debugf("attempts %d", attempts)
+		var attempts int
+		var err error
+		for attempts = 1; attempts <= maxRetries; attempts++ {
+			d.Logger.Debugf("write_attempt#%d", attempts)
 			err = handleWriteCommandRequest(deviceClient, req, params[i])
 			if err == nil {
 				break
+			} else if errors.Is(err, io.EOF) {
+				d.Logger.Errorf("handle write command request failed with EOF, retrying... attempt#%d, error: %v", attempts, err)
+				time.Sleep(retryDelay)
+				deviceClient, err = d.createDeviceClient(connectionInfo, true)
+				if err != nil {
+					d.Logger.Errorf("create device client failed, err: %v", err)
+					errs = append(errs, err)
+					// try to recreate the device client once more
+					deviceClient, err = d.createDeviceClient(connectionInfo, false)
+				}
+			} else {
+				d.Logger.Warnf("handle write command request failed, retrying... attempt#%d, error: %v", attempts, err)
 			}
-			errs = append(errs, err)
-			time.Sleep(retryDelay)
-			// recreate device client if error occurs
-			deviceClient, err = d.createDeviceClient(connectionInfo, true)
-			if err != nil {
-				errs = append(errs, err)
-			}
+		}
+		if attempts > maxRetries {
+			d.Logger.Errorf("handle write command request failed after %d attempts, error: %v", maxRetries, err)
+			errs = append(errs, fmt.Errorf("failed to handle write command request after %d attempts: %w", maxRetries, err))
+		} else {
+			driver.Logger.Debugf("Write command finished. Cmd:%v \n", req.DeviceResourceName)
 		}
 	}
 
@@ -259,7 +308,7 @@ func (d *Driver) Initialize(sdk interfaces.DeviceServiceSDK) error {
 	d.Logger = sdk.LoggingClient()
 	d.AsyncCh = sdk.AsyncValuesChannel()
 	d.addressMap = make(map[string]chan bool)
-	d.workingAddressCount = make(map[string]int)
+	d.workingAddressCount = make(map[string]*atomic.Int32)
 	d.clientMap = make(map[string]DeviceClient)
 	return nil
 }
@@ -292,7 +341,7 @@ func (d *Driver) waitAllCommandsToFinish() {
 loop:
 	for {
 		for _, count := range d.workingAddressCount {
-			if count != 0 {
+			if count.Load() != 0 {
 				// wait a moment and check again
 				time.Sleep(time.Second * SERVICE_STOP_WAIT_TIME)
 				continue loop
