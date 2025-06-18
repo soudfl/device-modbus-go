@@ -143,12 +143,6 @@ github.com/go-redis/redis/v7/internal/hashtag
 github.com/go-redis/redis/v7/internal/pool
 github.com/go-redis/redis/v7/internal/proto
 github.com/go-redis/redis/v7/internal/util
-# github.com/goburrow/modbus v0.1.0
-## explicit
-github.com/goburrow/modbus
-# github.com/goburrow/serial v0.1.0
-## explicit
-github.com/goburrow/serial
 # github.com/golang-jwt/jwt v3.2.2+incompatible
 ## explicit
 github.com/golang-jwt/jwt
@@ -158,6 +152,12 @@ github.com/google/uuid
 # github.com/gorilla/websocket v1.5.0
 ## explicit; go 1.12
 github.com/gorilla/websocket
+# github.com/grid-x/modbus v0.0.0-20250516072809-4b99c910e8e7
+## explicit; go 1.21
+github.com/grid-x/modbus
+# github.com/grid-x/serial v0.0.0-20211107191517-583c7356b3aa
+## explicit; go 1.13
+github.com/grid-x/serial
 # github.com/hashicorp/consul/api v1.25.1
 ## explicit; go 1.19
 github.com/hashicorp/consul/api

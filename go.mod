@@ -5,7 +5,7 @@ go 1.21
 require (
 	github.com/edgexfoundry/device-sdk-go/v3 v3.1.1
 	github.com/edgexfoundry/go-mod-core-contracts/v3 v3.1.0
-	github.com/goburrow/modbus v0.1.0
+	github.com/grid-x/modbus v0.0.0-20250516072809-4b99c910e8e7
 	github.com/spf13/cast v1.5.1
 	github.com/stretchr/testify v1.9.0
 )
@@ -32,10 +32,10 @@ require (
 	github.com/go-playground/universal-translator v0.18.1 // indirect
 	github.com/go-playground/validator/v10 v10.15.5 // indirect
 	github.com/go-redis/redis/v7 v7.3.0 // indirect
-	github.com/goburrow/serial v0.1.0 // indirect
 	github.com/golang-jwt/jwt v3.2.2+incompatible // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/gorilla/websocket v1.5.0 // indirect
+	github.com/grid-x/serial v0.0.0-20211107191517-583c7356b3aa // indirect
 	github.com/hashicorp/consul/api v1.25.1 // indirect
 	github.com/hashicorp/errwrap v1.1.0 // indirect
 	github.com/hashicorp/go-cleanhttp v0.5.2 // indirect

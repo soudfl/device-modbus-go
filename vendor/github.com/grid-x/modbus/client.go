@@ -5,14 +5,32 @@
 package modbus
 
 import (
+	"context"
 	"encoding/binary"
 	"fmt"
 )
+
+// Logger is the interface to the required logging functions
+type Logger interface {
+	Printf(format string, v ...any)
+}
+
+// DataSizeError represents an error for invalid data-sizes i.e. for cases
+// where the data-size does not match the expectation.
+type DataSizeError struct {
+	ExpectedBytes int
+	ActualBytes   int
+}
+
+func (e *DataSizeError) Error() string {
+	return fmt.Sprintf("modbus: response data size '%d' does not match count '%d'", e.ActualBytes, e.ExpectedBytes)
+}
 
 // ClientHandler is the interface that groups the Packager and Transporter methods.
 type ClientHandler interface {
 	Packager
 	Transporter
+	Connector
 }
 
 type client struct {
@@ -31,14 +49,17 @@ func NewClient2(packager Packager, transporter Transporter) Client {
 }
 
 // Request:
-//  Function code         : 1 byte (0x01)
-//  Starting address      : 2 bytes
-//  Quantity of coils     : 2 bytes
+//
+//	Function code         : 1 byte (0x01)
+//	Starting address      : 2 bytes
+//	Quantity of coils     : 2 bytes
+//
 // Response:
-//  Function code         : 1 byte (0x01)
-//  Byte count            : 1 byte
-//  Coil status           : N* bytes (=N or N+1)
-func (mb *client) ReadCoils(address, quantity uint16) (results []byte, err error) {
+//
+//	Function code         : 1 byte (0x01)
+//	Byte count            : 1 byte
+//	Coil status           : N* bytes (=N or N+1)
+func (mb *client) ReadCoils(ctx context.Context, address, quantity uint16) (results []byte, err error) {
 	if quantity < 1 || quantity > 2000 {
 		err = fmt.Errorf("modbus: quantity '%v' must be between '%v' and '%v',", quantity, 1, 2000)
 		return
@@ -47,29 +68,34 @@ func (mb *client) ReadCoils(address, quantity uint16) (results []byte, err error
 		FunctionCode: FuncCodeReadCoils,
 		Data:         dataBlock(address, quantity),
 	}
-	response, err := mb.send(&request)
+	response, err := mb.send(ctx, &request)
 	if err != nil {
 		return
 	}
 	count := int(response.Data[0])
 	length := len(response.Data) - 1
 	if count != length {
-		err = fmt.Errorf("modbus: response data size '%v' does not match count '%v'", length, count)
-		return
+		err = &DataSizeError{ExpectedBytes: count, ActualBytes: length}
+		if length < count {
+			return
+		}
 	}
-	results = response.Data[1:]
+	results = response.Data[1 : count+1]
 	return
 }
 
 // Request:
-//  Function code         : 1 byte (0x02)
-//  Starting address      : 2 bytes
-//  Quantity of inputs    : 2 bytes
+//
+//	Function code         : 1 byte (0x02)
+//	Starting address      : 2 bytes
+//	Quantity of inputs    : 2 bytes
+//
 // Response:
-//  Function code         : 1 byte (0x02)
-//  Byte count            : 1 byte
-//  Input status          : N* bytes (=N or N+1)
-func (mb *client) ReadDiscreteInputs(address, quantity uint16) (results []byte, err error) {
+//
+//	Function code         : 1 byte (0x02)
+//	Byte count            : 1 byte
+//	Input status          : N* bytes (=N or N+1)
+func (mb *client) ReadDiscreteInputs(ctx context.Context, address, quantity uint16) (results []byte, err error) {
 	if quantity < 1 || quantity > 2000 {
 		err = fmt.Errorf("modbus: quantity '%v' must be between '%v' and '%v',", quantity, 1, 2000)
 		return
@@ -78,29 +104,34 @@ func (mb *client) ReadDiscreteInputs(address, quantity uint16) (results []byte, 
 		FunctionCode: FuncCodeReadDiscreteInputs,
 		Data:         dataBlock(address, quantity),
 	}
-	response, err := mb.send(&request)
+	response, err := mb.send(ctx, &request)
 	if err != nil {
 		return
 	}
 	count := int(response.Data[0])
 	length := len(response.Data) - 1
 	if count != length {
-		err = fmt.Errorf("modbus: response data size '%v' does not match count '%v'", length, count)
-		return
+		err = &DataSizeError{ExpectedBytes: count, ActualBytes: length}
+		if length < count {
+			return
+		}
 	}
-	results = response.Data[1:]
+	results = response.Data[1 : count+1]
 	return
 }
 
 // Request:
-//  Function code         : 1 byte (0x03)
-//  Starting address      : 2 bytes
-//  Quantity of registers : 2 bytes
+//
+//	Function code         : 1 byte (0x03)
+//	Starting address      : 2 bytes
+//	Quantity of registers : 2 bytes
+//
 // Response:
-//  Function code         : 1 byte (0x03)
-//  Byte count            : 1 byte
-//  Register value        : Nx2 bytes
-func (mb *client) ReadHoldingRegisters(address, quantity uint16) (results []byte, err error) {
+//
+//	Function code         : 1 byte (0x03)
+//	Byte count            : 1 byte
+//	Register value        : Nx2 bytes
+func (mb *client) ReadHoldingRegisters(ctx context.Context, address, quantity uint16) (results []byte, err error) {
 	if quantity < 1 || quantity > 125 {
 		err = fmt.Errorf("modbus: quantity '%v' must be between '%v' and '%v',", quantity, 1, 125)
 		return
@@ -109,29 +140,38 @@ func (mb *client) ReadHoldingRegisters(address, quantity uint16) (results []byte
 		FunctionCode: FuncCodeReadHoldingRegisters,
 		Data:         dataBlock(address, quantity),
 	}
-	response, err := mb.send(&request)
+	response, err := mb.send(ctx, &request)
 	if err != nil {
 		return
 	}
 	count := int(response.Data[0])
 	length := len(response.Data) - 1
 	if count != length {
-		err = fmt.Errorf("modbus: response data size '%v' does not match count '%v'", length, count)
+		err = &DataSizeError{ExpectedBytes: count, ActualBytes: length}
+		if length < count {
+			return
+		}
+	}
+	if count != 2*int(quantity) {
+		err = fmt.Errorf("modbus: response data size '%v' does not match request quantity '%v'", length, quantity)
 		return
 	}
-	results = response.Data[1:]
+	results = response.Data[1 : count+1]
 	return
 }
 
 // Request:
-//  Function code         : 1 byte (0x04)
-//  Starting address      : 2 bytes
-//  Quantity of registers : 2 bytes
+//
+//	Function code         : 1 byte (0x04)
+//	Starting address      : 2 bytes
+//	Quantity of registers : 2 bytes
+//
 // Response:
-//  Function code         : 1 byte (0x04)
-//  Byte count            : 1 byte
-//  Input registers       : N bytes
-func (mb *client) ReadInputRegisters(address, quantity uint16) (results []byte, err error) {
+//
+//	Function code         : 1 byte (0x04)
+//	Byte count            : 1 byte
+//	Input registers       : N bytes
+func (mb *client) ReadInputRegisters(ctx context.Context, address, quantity uint16) (results []byte, err error) {
 	if quantity < 1 || quantity > 125 {
 		err = fmt.Errorf("modbus: quantity '%v' must be between '%v' and '%v',", quantity, 1, 125)
 		return
@@ -140,29 +180,38 @@ func (mb *client) ReadInputRegisters(address, quantity uint16) (results []byte, 
 		FunctionCode: FuncCodeReadInputRegisters,
 		Data:         dataBlock(address, quantity),
 	}
-	response, err := mb.send(&request)
+	response, err := mb.send(ctx, &request)
 	if err != nil {
 		return
 	}
 	count := int(response.Data[0])
 	length := len(response.Data) - 1
 	if count != length {
-		err = fmt.Errorf("modbus: response data size '%v' does not match count '%v'", length, count)
+		err = &DataSizeError{ExpectedBytes: count, ActualBytes: length}
+		if length < count {
+			return
+		}
+	}
+	if count != 2*int(quantity) {
+		err = fmt.Errorf("modbus: response data size '%v' does not match request quantity '%v'", length, quantity)
 		return
 	}
-	results = response.Data[1:]
+	results = response.Data[1 : count+1]
 	return
 }
 
 // Request:
-//  Function code         : 1 byte (0x05)
-//  Output address        : 2 bytes
-//  Output value          : 2 bytes
+//
+//	Function code         : 1 byte (0x05)
+//	Output address        : 2 bytes
+//	Output value          : 2 bytes
+//
 // Response:
-//  Function code         : 1 byte (0x05)
-//  Output address        : 2 bytes
-//  Output value          : 2 bytes
-func (mb *client) WriteSingleCoil(address, value uint16) (results []byte, err error) {
+//
+//	Function code         : 1 byte (0x05)
+//	Output address        : 2 bytes
+//	Output value          : 2 bytes
+func (mb *client) WriteSingleCoil(ctx context.Context, address, value uint16) (results []byte, err error) {
 	// The requested ON/OFF state can only be 0xFF00 and 0x0000
 	if value != 0xFF00 && value != 0x0000 {
 		err = fmt.Errorf("modbus: state '%v' must be either 0xFF00 (ON) or 0x0000 (OFF)", value)
@@ -172,13 +221,13 @@ func (mb *client) WriteSingleCoil(address, value uint16) (results []byte, err er
 		FunctionCode: FuncCodeWriteSingleCoil,
 		Data:         dataBlock(address, value),
 	}
-	response, err := mb.send(&request)
+	response, err := mb.send(ctx, &request)
 	if err != nil {
 		return
 	}
 	// Fixed response length
 	if len(response.Data) != 4 {
-		err = fmt.Errorf("modbus: response data size '%v' does not match expected '%v'", len(response.Data), 4)
+		err = &DataSizeError{ExpectedBytes: 4, ActualBytes: len(response.Data)}
 		return
 	}
 	respValue := binary.BigEndian.Uint16(response.Data)
@@ -196,25 +245,28 @@ func (mb *client) WriteSingleCoil(address, value uint16) (results []byte, err er
 }
 
 // Request:
-//  Function code         : 1 byte (0x06)
-//  Register address      : 2 bytes
-//  Register value        : 2 bytes
+//
+//	Function code         : 1 byte (0x06)
+//	Register address      : 2 bytes
+//	Register value        : 2 bytes
+//
 // Response:
-//  Function code         : 1 byte (0x06)
-//  Register address      : 2 bytes
-//  Register value        : 2 bytes
-func (mb *client) WriteSingleRegister(address, value uint16) (results []byte, err error) {
+//
+//	Function code         : 1 byte (0x06)
+//	Register address      : 2 bytes
+//	Register value        : 2 bytes
+func (mb *client) WriteSingleRegister(ctx context.Context, address, value uint16) (results []byte, err error) {
 	request := ProtocolDataUnit{
 		FunctionCode: FuncCodeWriteSingleRegister,
 		Data:         dataBlock(address, value),
 	}
-	response, err := mb.send(&request)
+	response, err := mb.send(ctx, &request)
 	if err != nil {
 		return
 	}
 	// Fixed response length
 	if len(response.Data) != 4 {
-		err = fmt.Errorf("modbus: response data size '%v' does not match expected '%v'", len(response.Data), 4)
+		err = &DataSizeError{ExpectedBytes: 4, ActualBytes: len(response.Data)}
 		return
 	}
 	respValue := binary.BigEndian.Uint16(response.Data)
@@ -232,16 +284,19 @@ func (mb *client) WriteSingleRegister(address, value uint16) (results []byte, er
 }
 
 // Request:
-//  Function code         : 1 byte (0x0F)
-//  Starting address      : 2 bytes
-//  Quantity of outputs   : 2 bytes
-//  Byte count            : 1 byte
-//  Outputs value         : N* bytes
+//
+//	Function code         : 1 byte (0x0F)
+//	Starting address      : 2 bytes
+//	Quantity of outputs   : 2 bytes
+//	Byte count            : 1 byte
+//	Outputs value         : N* bytes
+//
 // Response:
-//  Function code         : 1 byte (0x0F)
-//  Starting address      : 2 bytes
-//  Quantity of outputs   : 2 bytes
-func (mb *client) WriteMultipleCoils(address, quantity uint16, value []byte) (results []byte, err error) {
+//
+//	Function code         : 1 byte (0x0F)
+//	Starting address      : 2 bytes
+//	Quantity of outputs   : 2 bytes
+func (mb *client) WriteMultipleCoils(ctx context.Context, address, quantity uint16, value []byte) (results []byte, err error) {
 	if quantity < 1 || quantity > 1968 {
 		err = fmt.Errorf("modbus: quantity '%v' must be between '%v' and '%v',", quantity, 1, 1968)
 		return
@@ -250,13 +305,13 @@ func (mb *client) WriteMultipleCoils(address, quantity uint16, value []byte) (re
 		FunctionCode: FuncCodeWriteMultipleCoils,
 		Data:         dataBlockSuffix(value, address, quantity),
 	}
-	response, err := mb.send(&request)
+	response, err := mb.send(ctx, &request)
 	if err != nil {
 		return
 	}
 	// Fixed response length
 	if len(response.Data) != 4 {
-		err = fmt.Errorf("modbus: response data size '%v' does not match expected '%v'", len(response.Data), 4)
+		err = &DataSizeError{ExpectedBytes: 4, ActualBytes: len(response.Data)}
 		return
 	}
 	respValue := binary.BigEndian.Uint16(response.Data)
@@ -274,16 +329,19 @@ func (mb *client) WriteMultipleCoils(address, quantity uint16, value []byte) (re
 }
 
 // Request:
-//  Function code         : 1 byte (0x10)
-//  Starting address      : 2 bytes
-//  Quantity of outputs   : 2 bytes
-//  Byte count            : 1 byte
-//  Registers value       : N* bytes
+//
+//	Function code         : 1 byte (0x10)
+//	Starting address      : 2 bytes
+//	Quantity of outputs   : 2 bytes
+//	Byte count            : 1 byte
+//	Registers value       : N* bytes
+//
 // Response:
-//  Function code         : 1 byte (0x10)
-//  Starting address      : 2 bytes
-//  Quantity of registers : 2 bytes
-func (mb *client) WriteMultipleRegisters(address, quantity uint16, value []byte) (results []byte, err error) {
+//
+//	Function code         : 1 byte (0x10)
+//	Starting address      : 2 bytes
+//	Quantity of registers : 2 bytes
+func (mb *client) WriteMultipleRegisters(ctx context.Context, address, quantity uint16, value []byte) (results []byte, err error) {
 	if quantity < 1 || quantity > 123 {
 		err = fmt.Errorf("modbus: quantity '%v' must be between '%v' and '%v',", quantity, 1, 123)
 		return
@@ -292,13 +350,13 @@ func (mb *client) WriteMultipleRegisters(address, quantity uint16, value []byte)
 		FunctionCode: FuncCodeWriteMultipleRegisters,
 		Data:         dataBlockSuffix(value, address, quantity),
 	}
-	response, err := mb.send(&request)
+	response, err := mb.send(ctx, &request)
 	if err != nil {
 		return
 	}
 	// Fixed response length
 	if len(response.Data) != 4 {
-		err = fmt.Errorf("modbus: response data size '%v' does not match expected '%v'", len(response.Data), 4)
+		err = &DataSizeError{ExpectedBytes: 4, ActualBytes: len(response.Data)}
 		return
 	}
 	respValue := binary.BigEndian.Uint16(response.Data)
@@ -316,27 +374,30 @@ func (mb *client) WriteMultipleRegisters(address, quantity uint16, value []byte)
 }
 
 // Request:
-//  Function code         : 1 byte (0x16)
-//  Reference address     : 2 bytes
-//  AND-mask              : 2 bytes
-//  OR-mask               : 2 bytes
+//
+//	Function code         : 1 byte (0x16)
+//	Reference address     : 2 bytes
+//	AND-mask              : 2 bytes
+//	OR-mask               : 2 bytes
+//
 // Response:
-//  Function code         : 1 byte (0x16)
-//  Reference address     : 2 bytes
-//  AND-mask              : 2 bytes
-//  OR-mask               : 2 bytes
-func (mb *client) MaskWriteRegister(address, andMask, orMask uint16) (results []byte, err error) {
+//
+//	Function code         : 1 byte (0x16)
+//	Reference address     : 2 bytes
+//	AND-mask              : 2 bytes
+//	OR-mask               : 2 bytes
+func (mb *client) MaskWriteRegister(ctx context.Context, address, andMask, orMask uint16) (results []byte, err error) {
 	request := ProtocolDataUnit{
 		FunctionCode: FuncCodeMaskWriteRegister,
 		Data:         dataBlock(address, andMask, orMask),
 	}
-	response, err := mb.send(&request)
+	response, err := mb.send(ctx, &request)
 	if err != nil {
 		return
 	}
 	// Fixed response length
 	if len(response.Data) != 6 {
-		err = fmt.Errorf("modbus: response data size '%v' does not match expected '%v'", len(response.Data), 6)
+		err = &DataSizeError{ExpectedBytes: 6, ActualBytes: len(response.Data)}
 		return
 	}
 	respValue := binary.BigEndian.Uint16(response.Data)
@@ -359,18 +420,21 @@ func (mb *client) MaskWriteRegister(address, andMask, orMask uint16) (results []
 }
 
 // Request:
-//  Function code         : 1 byte (0x17)
-//  Read starting address : 2 bytes
-//  Quantity to read      : 2 bytes
-//  Write starting address: 2 bytes
-//  Quantity to write     : 2 bytes
-//  Write byte count      : 1 byte
-//  Write registers value : N* bytes
+//
+//	Function code         : 1 byte (0x17)
+//	Read starting address : 2 bytes
+//	Quantity to read      : 2 bytes
+//	Write starting address: 2 bytes
+//	Quantity to write     : 2 bytes
+//	Write byte count      : 1 byte
+//	Write registers value : N* bytes
+//
 // Response:
-//  Function code         : 1 byte (0x17)
-//  Byte count            : 1 byte
-//  Read registers value  : Nx2 bytes
-func (mb *client) ReadWriteMultipleRegisters(readAddress, readQuantity, writeAddress, writeQuantity uint16, value []byte) (results []byte, err error) {
+//
+//	Function code         : 1 byte (0x17)
+//	Byte count            : 1 byte
+//	Read registers value  : Nx2 bytes
+func (mb *client) ReadWriteMultipleRegisters(ctx context.Context, readAddress, readQuantity, writeAddress, writeQuantity uint16, value []byte) (results []byte, err error) {
 	if readQuantity < 1 || readQuantity > 125 {
 		err = fmt.Errorf("modbus: quantity to read '%v' must be between '%v' and '%v',", readQuantity, 1, 125)
 		return
@@ -383,34 +447,40 @@ func (mb *client) ReadWriteMultipleRegisters(readAddress, readQuantity, writeAdd
 		FunctionCode: FuncCodeReadWriteMultipleRegisters,
 		Data:         dataBlockSuffix(value, readAddress, readQuantity, writeAddress, writeQuantity),
 	}
-	response, err := mb.send(&request)
+	response, err := mb.send(ctx, &request)
 	if err != nil {
 		return
 	}
 	count := int(response.Data[0])
-	if count != (len(response.Data) - 1) {
-		err = fmt.Errorf("modbus: response data size '%v' does not match count '%v'", len(response.Data)-1, count)
-		return
+	length := len(response.Data) - 1
+	if count != length {
+		err = &DataSizeError{ExpectedBytes: count, ActualBytes: length}
+		if length < count {
+			return
+		}
 	}
-	results = response.Data[1:]
+	results = response.Data[1 : count+1]
 	return
 }
 
 // Request:
-//  Function code         : 1 byte (0x18)
-//  FIFO pointer address  : 2 bytes
+//
+//	Function code         : 1 byte (0x18)
+//	FIFO pointer address  : 2 bytes
+//
 // Response:
-//  Function code         : 1 byte (0x18)
-//  Byte count            : 2 bytes
-//  FIFO count            : 2 bytes
-//  FIFO count            : 2 bytes (<=31)
-//  FIFO value register   : Nx2 bytes
-func (mb *client) ReadFIFOQueue(address uint16) (results []byte, err error) {
+//
+//	Function code         : 1 byte (0x18)
+//	Byte count            : 2 bytes
+//	FIFO count            : 2 bytes
+//	FIFO count            : 2 bytes (<=31)
+//	FIFO value register   : Nx2 bytes
+func (mb *client) ReadFIFOQueue(ctx context.Context, address uint16) (results []byte, err error) {
 	request := ProtocolDataUnit{
 		FunctionCode: FuncCodeReadFIFOQueue,
 		Data:         dataBlock(address),
 	}
-	response, err := mb.send(&request)
+	response, err := mb.send(ctx, &request)
 	if err != nil {
 		return
 	}
@@ -419,11 +489,14 @@ func (mb *client) ReadFIFOQueue(address uint16) (results []byte, err error) {
 		return
 	}
 	count := int(binary.BigEndian.Uint16(response.Data))
-	if count != (len(response.Data) - 1) {
-		err = fmt.Errorf("modbus: response data size '%v' does not match count '%v'", len(response.Data)-1, count)
-		return
+	length := len(response.Data) - 1
+	if count != length {
+		err = &DataSizeError{ExpectedBytes: count, ActualBytes: length}
+		if length < count {
+			return
+		}
 	}
-	count = int(binary.BigEndian.Uint16(response.Data[2:]))
+	count = int(binary.BigEndian.Uint16(response.Data[2 : count+2]))
 	if count > 31 {
 		err = fmt.Errorf("modbus: fifo count '%v' is greater than expected '%v'", count, 31)
 		return
@@ -435,12 +508,12 @@ func (mb *client) ReadFIFOQueue(address uint16) (results []byte, err error) {
 // Helpers
 
 // send sends request and checks possible exception in the response.
-func (mb *client) send(request *ProtocolDataUnit) (response *ProtocolDataUnit, err error) {
+func (mb *client) send(ctx context.Context, request *ProtocolDataUnit) (response *ProtocolDataUnit, err error) {
 	aduRequest, err := mb.packager.Encode(request)
 	if err != nil {
 		return
 	}
-	aduResponse, err := mb.transporter.Send(aduRequest)
+	aduResponse, err := mb.transporter.Send(ctx, aduRequest)
 	if err != nil {
 		return
 	}
@@ -486,7 +559,7 @@ func dataBlockSuffix(suffix []byte, value ...uint16) []byte {
 }
 
 func responseError(response *ProtocolDataUnit) error {
-	mbError := &ModbusError{FunctionCode: response.FunctionCode}
+	mbError := &Error{FunctionCode: response.FunctionCode}
 	if response.Data != nil && len(response.Data) > 0 {
 		mbError.ExceptionCode = response.Data[0]
 	}
