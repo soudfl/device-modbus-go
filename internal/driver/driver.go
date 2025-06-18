@@ -173,10 +173,16 @@ func (d *Driver) HandleReadCommands(deviceName string, protocols map[string]mode
 			} else if errors.Is(err, io.EOF) {
 				d.Logger.Errorf("handle read command request failed with EOF, retrying... attempt#%d, error: %v", attempts, err)
 				time.Sleep(retryDelay)
-				deviceClient, err = d.createDeviceClient(connectionInfo, true)
-				if err != nil {
-					d.Logger.Errorf("create device client failed, err: %v", err)
-					break
+				for createAttempts := 1; createAttempts <= maxRetries; createAttempts++ {
+					deviceClient, err = d.createDeviceClient(connectionInfo, true)
+					if err == nil {
+						d.Logger.Debugf("Recreated device client successfully on attempt#%d", createAttempts)
+						break
+					}
+					d.Logger.Errorf("Failed to recreate device client on attempt#%d, error: %v", createAttempts, err)
+					if createAttempts == maxRetries {
+						return nil, fmt.Errorf("failed to recreate device client after %d attempts: %w", maxRetries, err)
+					}
 				}
 			} else {
 				err := fmt.Errorf("handle read command request failed, error: %w", err)
@@ -260,12 +266,16 @@ func (d *Driver) HandleWriteCommands(deviceName string, protocols map[string]mod
 			} else if errors.Is(err, io.EOF) {
 				d.Logger.Errorf("handle write command request failed with EOF, retrying... attempt#%d, error: %v", attempts, err)
 				time.Sleep(retryDelay)
-				deviceClient, err = d.createDeviceClient(connectionInfo, true)
-				if err != nil {
-					d.Logger.Errorf("create device client failed, err: %v", err)
-					errs = append(errs, err)
-					// try to recreate the device client once more
-					deviceClient, err = d.createDeviceClient(connectionInfo, false)
+				for createAttempts := 1; createAttempts <= maxRetries; createAttempts++ {
+					deviceClient, err = d.createDeviceClient(connectionInfo, true)
+					if err == nil {
+						d.Logger.Debugf("Recreated device client successfully on attempt#%d", createAttempts)
+						break
+					}
+					d.Logger.Errorf("Failed to recreate device client on attempt#%d, error: %v", createAttempts, err)
+					if createAttempts == maxRetries {
+						return fmt.Errorf("failed to recreate device client after %d attempts: %w", maxRetries, err)
+					}
 				}
 			} else {
 				d.Logger.Warnf("handle write command request failed, retrying... attempt#%d, error: %v", attempts, err)
