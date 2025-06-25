@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/edgexfoundry/device-sdk-go/v3/pkg/interfaces"
@@ -25,13 +26,13 @@ var once sync.Once
 var driver *Driver
 
 type Driver struct {
-	Logger              logger.LoggingClient
-	AsyncCh             chan<- *sdkModel.AsyncValues
-	addressMutex        sync.Mutex
-	addressMap map[string]*semaphore.Weighted
-	stopped             bool
-	clientMutex         sync.RWMutex
-	clientMap           map[string]DeviceClient
+	Logger       logger.LoggingClient
+	AsyncCh      chan<- *sdkModel.AsyncValues
+	addressMutex sync.Mutex
+	addressMap   map[string]*semaphore.Weighted
+	stopped      bool
+	clientMutex  sync.RWMutex
+	clientMap    map[string]DeviceClient
 }
 
 var concurrentCommandLimit = 100
@@ -79,32 +80,32 @@ func (d *Driver) DisconnectDevice(deviceName string, protocols map[string]models
 
 // lockAddress mark address is unavailable because real device handle one request at a time
 func (d *Driver) lockAddress(address string) error {
-    if d.stopped {
-        return fmt.Errorf("service attempts to stop and unable to handle new request")
-    }
-    d.addressMutex.Lock()
-    sem, ok := d.addressMap[address]
-    if !ok {
-        sem = semaphore.NewWeighted(int64(concurrentCommandLimit))
-        d.addressMap[address] = sem
-    }
-    d.addressMutex.Unlock()
+	if d.stopped {
+		return fmt.Errorf("service attempts to stop and unable to handle new request")
+	}
+	d.addressMutex.Lock()
+	sem, ok := d.addressMap[address]
+	if !ok {
+		sem = semaphore.NewWeighted(int64(concurrentCommandLimit))
+		d.addressMap[address] = sem
+	}
+	d.addressMutex.Unlock()
 
-    // Use context.Background(), or pass a context if you want cancellation support
-    if !sem.TryAcquire(1) {
-        errorMessage := "High-frequency command execution."
-        d.Logger.Error(errorMessage)
-        return fmt.Errorf(errorMessage)
-    }
-    return nil
+	// Use context.Background(), or pass a context if you want cancellation support
+	if !sem.TryAcquire(1) {
+		errorMessage := "High-frequency command execution."
+		d.Logger.Error(errorMessage)
+		return fmt.Errorf("%s", errorMessage)
+	}
+	return nil
 }
 
 // unlockAddress remove token after command finish
 func (d *Driver) unlockAddress(address string) {
-    d.addressMutex.Lock()
-    sem := d.addressMap[address]
-    d.addressMutex.Unlock()
-    sem.Release(1)
+	d.addressMutex.Lock()
+	sem := d.addressMap[address]
+	d.addressMutex.Unlock()
+	sem.Release(1)
 }
 
 // lockableAddress return the lockable address according to the protocol
@@ -154,8 +155,8 @@ func (d *Driver) HandleReadCommands(deviceName string, protocols map[string]mode
 			if err == nil {
 				responses[i] = res
 				break
-			} else if errors.Is(err, io.EOF) {
-				d.Logger.Errorf("handle read command request failed with EOF, retrying... attempt#%d, error: %v", attempts, err)
+			} else if errors.Is(err, io.EOF) || errors.Is(err, syscall.ECONNRESET) {
+				d.Logger.Errorf("handle read command request failed with conn issue, retrying... attempt#%d, error: %v", attempts, err)
 				time.Sleep(retryDelay)
 				for createAttempts := 1; createAttempts <= maxRetries; createAttempts++ {
 					deviceClient, err = d.createDeviceClient(connectionInfo, true)
@@ -247,8 +248,8 @@ func (d *Driver) HandleWriteCommands(deviceName string, protocols map[string]mod
 			err = handleWriteCommandRequest(deviceClient, req, params[i])
 			if err == nil {
 				break
-			} else if errors.Is(err, io.EOF) {
-				d.Logger.Errorf("handle write command request failed with EOF, retrying... attempt#%d, error: %v", attempts, err)
+			} else if errors.Is(err, io.EOF) || errors.Is(err, syscall.ECONNRESET) {
+				d.Logger.Errorf("handle write command request failed with conn issue, retrying... attempt#%d, error: %v", attempts, err)
 				time.Sleep(retryDelay)
 				for createAttempts := 1; createAttempts <= maxRetries; createAttempts++ {
 					deviceClient, err = d.createDeviceClient(connectionInfo, true)
@@ -325,7 +326,7 @@ func (d *Driver) Stop(force bool) error {
 	}
 	d.Logger.Info("All commands finished, closing all address locks")
 	d.addressMutex.Lock()
-	
+
 	for k := range d.addressMap {
 		d.Logger.Debugf("Clearing address lock for %s", k)
 		delete(d.addressMap, k)
@@ -337,23 +338,23 @@ func (d *Driver) Stop(force bool) error {
 // waitAllCommandsToFinish used to check and wait for the unfinished job
 func (d *Driver) waitAllCommandsToFinish() {
 	for {
-        allIdle := true
-        d.addressMutex.Lock()
-        for _, sem := range d.addressMap {
-            if sem != nil && sem.TryAcquire(int64(concurrentCommandLimit)) {
-                // All permits available, release them back
-                sem.Release(int64(concurrentCommandLimit))
-            } else {
-                allIdle = false
-                break
-            }
-        }
-        d.addressMutex.Unlock()
-        if allIdle {
-            break
-        }
-        time.Sleep(time.Second * SERVICE_STOP_WAIT_TIME)
-    }
+		allIdle := true
+		d.addressMutex.Lock()
+		for _, sem := range d.addressMap {
+			if sem != nil && sem.TryAcquire(int64(concurrentCommandLimit)) {
+				// All permits available, release them back
+				sem.Release(int64(concurrentCommandLimit))
+			} else {
+				allIdle = false
+				break
+			}
+		}
+		d.addressMutex.Unlock()
+		if allIdle {
+			break
+		}
+		time.Sleep(time.Second * SERVICE_STOP_WAIT_TIME)
+	}
 }
 
 func (d *Driver) AddDevice(deviceName string, protocols map[string]models.ProtocolProperties, adminState models.AdminState) error {
