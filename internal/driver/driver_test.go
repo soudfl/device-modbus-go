@@ -7,6 +7,7 @@
 package driver
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"testing"
@@ -14,6 +15,7 @@ import (
 	sdkModel "github.com/edgexfoundry/device-sdk-go/v3/pkg/models"
 	"github.com/edgexfoundry/go-mod-core-contracts/v3/clients/logger"
 	"github.com/stretchr/testify/assert"
+	"golang.org/x/sync/semaphore"
 )
 
 func init() {
@@ -22,29 +24,39 @@ func init() {
 }
 
 func TestLockAddressWithAddressCountLimit(t *testing.T) {
-	address := "/dev/USB0tty"
-	driver.addressMap = make(map[string]chan bool)
-	driver.workingAddressCount = make(map[string]int)
-	driver.workingAddressCount[address] = concurrentCommandLimit
+    address := "/dev/USB0tty"
+    driver.addressMap = map[string]*semaphore.Weighted{}
+    sem := semaphore.NewWeighted(int64(concurrentCommandLimit))
+    // Acquire all permits to simulate the limit being reached
+    err := sem.Acquire(context.Background(), int64(concurrentCommandLimit))
+    if err != nil {
+        t.Fatalf("Failed to acquire all permits for setup: %v", err)
+    }
+    driver.addressMap[address] = sem
 
-	err := driver.lockAddress(address)
+    err = driver.lockAddress(address)
 
-	if err == nil || !strings.Contains(err.Error(), "High-frequency command execution") {
-		t.Errorf("Unexpect result, it should return high-frequency error, %v", err)
-	}
+    if err == nil || !strings.Contains(err.Error(), "High-frequency command execution") {
+        t.Errorf("Unexpected result, it should return semaphore acquire error, %v", err)
+    }
 }
 
 func TestLockAddressWithAddressCountUnderLimit(t *testing.T) {
-	address := "/dev/USB0tty"
-	driver.addressMap = make(map[string]chan bool)
-	driver.workingAddressCount = make(map[string]int)
-	driver.workingAddressCount[address] = concurrentCommandLimit - 1
+    address := "/dev/USB0tty"
+    driver.addressMap = map[string]*semaphore.Weighted{}
+    sem := semaphore.NewWeighted(int64(concurrentCommandLimit))
+    // Acquire one less than the limit
+    err := sem.Acquire(context.Background(), int64(concurrentCommandLimit-1))
+    if err != nil {
+        t.Fatalf("Failed to acquire permits for setup: %v", err)
+    }
+    driver.addressMap[address] = sem
 
-	err := driver.lockAddress(address)
+    err = driver.lockAddress(address)
 
-	if err != nil {
-		t.Errorf("Unexpect result, address should be lock successfully, %v", err)
-	}
+    if err != nil {
+        t.Errorf("Unexpected result, address should be locked successfully, %v", err)
+    }
 }
 
 func TestDriver_createDeviceClient(t *testing.T) {
@@ -52,7 +64,7 @@ func TestDriver_createDeviceClient(t *testing.T) {
 	type fields struct {
 		Logger              logger.LoggingClient
 		AsyncCh             chan<- *sdkModel.AsyncValues
-		addressMap          map[string]chan bool
+		addressMap          map[string]*semaphore.Weighted
 		workingAddressCount map[string]int
 		stopped             bool
 		clientMap           map[string]DeviceClient
@@ -71,7 +83,7 @@ func TestDriver_createDeviceClient(t *testing.T) {
 			name: "OK - reuse modbus-tcp client",
 			fields: fields{
 				Logger:              mockLogger,
-				addressMap:          make(map[string]chan bool),
+				addressMap:          map[string]*semaphore.Weighted{},
 				workingAddressCount: make(map[string]int),
 				clientMap: map[string]DeviceClient{
 					"modbus-tcp:172.0.0.1:502": &ModbusClient{},
@@ -98,7 +110,7 @@ func TestDriver_createDeviceClient(t *testing.T) {
 			name: "OK - reuse modbus-rtu client",
 			fields: fields{
 				Logger:              mockLogger,
-				addressMap:          make(map[string]chan bool),
+				addressMap:          map[string]*semaphore.Weighted{},
 				workingAddressCount: make(map[string]int),
 				clientMap: map[string]DeviceClient{
 					"modbus-rtu:172.0.0.1:502:9600:8:1:N": &ModbusClient{},
@@ -128,7 +140,7 @@ func TestDriver_createDeviceClient(t *testing.T) {
 				Logger:              tt.fields.Logger,
 				AsyncCh:             tt.fields.AsyncCh,
 				addressMap:          tt.fields.addressMap,
-				workingAddressCount: tt.fields.workingAddressCount,
+				// workingAddressCount: tt.fields.workingAddressCount,
 				stopped:             tt.fields.stopped,
 				clientMap:           tt.fields.clientMap,
 			}
