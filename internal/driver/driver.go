@@ -37,8 +37,12 @@ type Driver struct {
 
 var concurrentCommandLimit = 100
 
-const maxRetries = 5
-const retryDelay = time.Millisecond * 80
+const (
+	maxReadRetries = 5
+	maxCreateRetries = 5
+	maxWriteRetries = 10
+	retryDelay = time.Millisecond * 0
+)
 
 func (d *Driver) createDeviceClient(info *ConnectionInfo, recreate bool) (c DeviceClient, err error) {
 	key := info.String()
@@ -148,7 +152,7 @@ func (d *Driver) HandleReadCommands(deviceName string, protocols map[string]mode
 	for i, req := range reqs {
 		var attempts int
 		var err error
-		for attempts = 1; attempts <= maxRetries; attempts++ {
+		for attempts = 1; attempts <= maxReadRetries; attempts++ {
 			d.Logger.Debugf("read_attempt#%d", attempts)
 			var res *sdkModel.CommandValue
 			res, err = handleReadCommandRequest(deviceClient, req)
@@ -158,15 +162,15 @@ func (d *Driver) HandleReadCommands(deviceName string, protocols map[string]mode
 			} else if errors.Is(err, io.EOF) || errors.Is(err, syscall.ECONNRESET) {
 				d.Logger.Errorf("handle read command request failed with conn issue, retrying... attempt#%d, error: %v", attempts, err)
 				time.Sleep(retryDelay)
-				for createAttempts := 1; createAttempts <= maxRetries; createAttempts++ {
+				for createAttempts := 1; createAttempts <= maxCreateRetries; createAttempts++ {
 					deviceClient, err = d.createDeviceClient(connectionInfo, true)
 					if err == nil {
 						d.Logger.Debugf("Recreated device client successfully on attempt#%d", createAttempts)
 						break
 					}
 					d.Logger.Errorf("Failed to recreate device client on attempt#%d, error: %v", createAttempts, err)
-					if createAttempts == maxRetries {
-						return nil, fmt.Errorf("failed to recreate device client after %d attempts: %w", maxRetries, err)
+					if createAttempts == maxCreateRetries {
+						return nil, fmt.Errorf("failed to recreate device client after %d attempts: %w", maxCreateRetries, err)
 					}
 				}
 			} else {
@@ -175,9 +179,9 @@ func (d *Driver) HandleReadCommands(deviceName string, protocols map[string]mode
 				return nil, err
 			}
 		}
-		if attempts > maxRetries {
-			d.Logger.Errorf("handle read command request failed after %d attempts, error: %v", maxRetries, err)
-			return nil, fmt.Errorf("failed to handle read command request after %d attempts: %w", maxRetries, err)
+		if attempts > maxReadRetries {
+			d.Logger.Errorf("handle read command request failed after %d attempts, error: %v", maxReadRetries, err)
+			return nil, fmt.Errorf("failed to handle read command request after %d attempts: %w", maxReadRetries, err)
 		}
 		if responses[i] == nil {
 			err = fmt.Errorf("handle read command request failed, response is nil, error: %w", err)
@@ -243,7 +247,7 @@ func (d *Driver) HandleWriteCommands(deviceName string, protocols map[string]mod
 	for i, req := range reqs {
 		var attempts int
 		var err error
-		for attempts = 1; attempts <= maxRetries; attempts++ {
+		for attempts = 1; attempts <= maxWriteRetries; attempts++ {
 			d.Logger.Debugf("write_attempt#%d", attempts)
 			err = handleWriteCommandRequest(deviceClient, req, params[i])
 			if err == nil {
@@ -251,24 +255,24 @@ func (d *Driver) HandleWriteCommands(deviceName string, protocols map[string]mod
 			} else if errors.Is(err, io.EOF) || errors.Is(err, syscall.ECONNRESET) {
 				d.Logger.Errorf("handle write command request failed with conn issue, retrying... attempt#%d, error: %v", attempts, err)
 				time.Sleep(retryDelay)
-				for createAttempts := 1; createAttempts <= maxRetries; createAttempts++ {
+				for createAttempts := 1; createAttempts <= maxCreateRetries; createAttempts++ {
 					deviceClient, err = d.createDeviceClient(connectionInfo, true)
 					if err == nil {
 						d.Logger.Debugf("Recreated device client successfully on attempt#%d", createAttempts)
 						break
 					}
 					d.Logger.Errorf("Failed to recreate device client on attempt#%d, error: %v", createAttempts, err)
-					if createAttempts == maxRetries {
-						return fmt.Errorf("failed to recreate device client after %d attempts: %w", maxRetries, err)
+					if createAttempts == maxCreateRetries {
+						return fmt.Errorf("failed to recreate device client after %d attempts: %w", maxCreateRetries, err)
 					}
 				}
 			} else {
 				d.Logger.Warnf("handle write command request failed, retrying... attempt#%d, error: %v", attempts, err)
 			}
 		}
-		if attempts > maxRetries {
-			d.Logger.Errorf("handle write command request failed after %d attempts, error: %v", maxRetries, err)
-			errs = append(errs, fmt.Errorf("failed to handle write command request after %d attempts: %w", maxRetries, err))
+		if attempts > maxWriteRetries {
+			d.Logger.Errorf("handle write command request failed after %d attempts, error: %v", maxWriteRetries, err)
+			errs = append(errs, fmt.Errorf("failed to handle write command request after %d attempts: %w", maxWriteRetries, err))
 		} else {
 			driver.Logger.Debugf("Write command finished. Cmd:%v \n", req.DeviceResourceName)
 		}
